@@ -3497,7 +3497,14 @@ static int pmbd_seg_read_write(PMBD_DEVICE_T* pmbd, struct page *page, unsigned 
 
 	return err;
 }
+static int pmbd_map(PMBD_DEVICE_T* pmbd, struct page *page,int int rw,sector_t sector){
+	struct inode *inode = mapping->host;
+	struct page *mpage;
+	int npage=g_highmem_curr_addr>>PAGE_SHIFT+sector>>(PAGE_SHIFT-SECTOR_SHIFT);
+    mpage=pfn_to_page(npage);
 
+
+}
 static int pmbd_do_bvec(PMBD_DEVICE_T* pmbd, struct page *page,
 			unsigned int len, unsigned int off, int rw, sector_t sector, unsigned do_fua)
 {	

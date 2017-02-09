@@ -195,8 +195,9 @@
 #include <asm/i387.h>
 #include <asm/asm.h>
 #include "pmbd.h"
+#include <linux/seq_file.h> 
 
-#if LINUX_VERSION_CODE == KERNEL_VERSION(3,2,1)
+#if LINUX_VERSION_CODE == KERNEL_VERSION(3,11,0)
 #include <linux/delay.h>
 #endif
 
@@ -206,6 +207,23 @@ static int max_part = 4;					/* maximum num of partitions */
 static int part_shift = 0;					/* partition shift */
 static LIST_HEAD(pmbd_devices);					/* device list */
 static DEFINE_MUTEX(pmbd_devices_mutex);				/* device mutex */
+static int map=0;
+static int nomap=0;
+static int off_r=0;
+static int off_w=0;
+static int size_r=0;
+static int size_w=0;
+static int page_r=0;
+static int page_w=0;
+static int file_r=0;
+static int file_w=0;
+static int ino[20]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static int n_ino=0;
+
+
+
+
+
 
 /* /proc file system entry */
 static struct proc_dir_entry* proc_pmbd = NULL;
@@ -3467,7 +3485,7 @@ static int pmbd_seg_read_write(PMBD_DEVICE_T* pmbd, struct page *page, unsigned 
 	void *mem;
 	int err = 0;
 
-	mem = kmap_atomic(page, KM_USER0);
+	mem = kmap_atomic(page);
 	if (rw == READ) {
 		copy_from_pmbd(pmbd, mem + off, sector, len);
 		flush_dcache_page(page);
@@ -3475,14 +3493,31 @@ static int pmbd_seg_read_write(PMBD_DEVICE_T* pmbd, struct page *page, unsigned 
 		flush_dcache_page(page);
 		copy_to_pmbd(pmbd, mem + off, sector, len, do_fua);
 	}
-	kunmap_atomic(mem, KM_USER0);
+	kunmap_atomic(mem);
 
 	return err;
 }
 
 static int pmbd_do_bvec(PMBD_DEVICE_T* pmbd, struct page *page,
 			unsigned int len, unsigned int off, int rw, sector_t sector, unsigned do_fua)
-{
+{	
+	if(len==PAGE_SIZE && off==0 && (sector<<SECTOR_SHIFT & ~PAGE_MASK)==0)
+	++map;
+	else ++nomap;
+	if(off==0) off_r++;
+	else ++off_w;
+	if(len==PAGE_SIZE) ++size_r;
+	else ++size_w;
+	if((sector<<SECTOR_SHIFT & ~PAGE_MASK)==0) ++page_r;
+	else ++page_w;
+	unsigned long map=(unsigned long) page->mapping;
+	if((!(map&1))&& map!=0 ){ 
+	++file_r;
+	ino[n_ino++]=page->mapping->host->i_ino;
+	n_ino=n_ino%20;
+	}
+	else ++file_w;
+
 	return pmbd_seg_read_write(pmbd, page, len, off, rw, sector, do_fua);
 }
 
@@ -3592,7 +3627,7 @@ static int pmbd_write_barrier(PMBD_DEVICE_T* pmbd)
 }
 
 
-#if LINUX_VERSION_CODE == KERNEL_VERSION(3,2,1)
+#if LINUX_VERSION_CODE == KERNEL_VERSION(3,11,0)
 //	#define BIO_WR_BARRIER(BIO)	(((BIO)->bi_rw & REQ_FLUSH) == REQ_FLUSH)
 //	#define BIO_WR_BARRIER(BIO)	((BIO)->bi_rw & (REQ_FLUSH | REQ_FLUSH_SEQ))
 	#define BIO_WR_BARRIER(BIO)	(((BIO)->bi_rw & WRITE_FLUSH) == WRITE_FLUSH)
@@ -3603,7 +3638,7 @@ static int pmbd_write_barrier(PMBD_DEVICE_T* pmbd)
 	#define BIO_WR_SYNC(BIO)	(((BIO)->bi_rw & WRITE_SYNC) == WRITE_SYNC)
 #endif
 
-#if LINUX_VERSION_CODE == KERNEL_VERSION(3,2,1)
+#if LINUX_VERSION_CODE == KERNEL_VERSION(3,11,0)
 #define MKREQ_RTN_TYPE	void
 #elif LINUX_VERSION_CODE == KERNEL_VERSION(2,6,34)
 #define MKREQ_RTN_TYPE	int
@@ -3652,7 +3687,7 @@ static MKREQ_RTN_TYPE pmbd_make_request(struct request_queue *q, struct bio *bio
 			pmbd_write_barrier(pmbd);
 	}
 
-#if LINUX_VERSION_CODE == KERNEL_VERSION(3,2,1)
+#if LINUX_VERSION_CODE == KERNEL_VERSION(3,11,0)
 	if (BIO_WR_FUA(bio)){
 		bio_is_write_fua = TRUE;
 //		printk(KERN_INFO "pmbd: received FUA request %u %d %lx %d\n", (unsigned int) sector, num_sectors, bio->bi_rw, rw);
@@ -4007,6 +4042,7 @@ static int pmbd_proc_pmbdstat_read(char* buffer, char** start, off_t offset, int
 }
 
 /* /proc/pmbdcfg */
+/*
 static int pmbd_proc_pmbdcfg_read(char* buffer, char** start, off_t offset, int count, int* eof, void* data)
 {
 	int rtn;
@@ -4018,7 +4054,7 @@ static int pmbd_proc_pmbdcfg_read(char* buffer, char** start, off_t offset, int 
 		PMBD_DEVICE_T* pmbd, *next;
 		local_buffer[0] = '\0';
 
-		/* global configurations */
+		// global configurations 
 		sprintf(local_buffer+strlen(local_buffer), "MODULE OPTIONS: %s\n", mode);
 		sprintf(local_buffer+strlen(local_buffer), "\n");
 
@@ -4049,7 +4085,7 @@ static int pmbd_proc_pmbdcfg_read(char* buffer, char** start, off_t offset, int 
 		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_buffer_stride %llu\n", g_pmbd_buffer_stride);
 		sprintf(local_buffer+strlen(local_buffer), "\n");
 
-		/* device specific configurations */
+		// device specific configurations 
 		list_for_each_entry_safe(pmbd, next, &pmbd_devices, pmbd_list) {
 			int i = 0;
 
@@ -4089,8 +4125,94 @@ static int pmbd_proc_pmbdcfg_read(char* buffer, char** start, off_t offset, int 
 	}
 	return rtn;
 }
+*/
+static int pmbd_proc_pmbdcfg_read(struct seq_file* m,void* v)
+{
+	int rtn;
 
+		rtn  = 0;
+	
+		char* local_buffer = kzalloc(8192, GFP_KERNEL);
+		PMBD_DEVICE_T* pmbd, *next;
+		local_buffer[0] = '\0';
 
+		// global configurations 
+		sprintf(local_buffer+strlen(local_buffer),"off_right %d off_wrong %d\n",off_r,off_w);
+		sprintf(local_buffer+strlen(local_buffer),"size_right %d size_wrong %d\n",size_r,size_w);
+		sprintf(local_buffer+strlen(local_buffer),"page_right %d page_wrong %d\n",page_r,page_w);
+		sprintf(local_buffer+strlen(local_buffer),"file_right %d file_wrong %d\n",file_r,file_w);
+		sprintf(local_buffer+strlen(local_buffer),"map %d nomap %d\n",map,nomap);
+		int j=0;
+		for(j=0;j<20;++j) sprintf(local_buffer+strlen(local_buffer),"ino %d\n",ino[j]);
+
+		sprintf(local_buffer+strlen(local_buffer), "MODULE OPTIONS: %s\n", mode);
+		sprintf(local_buffer+strlen(local_buffer), "\n");
+
+		sprintf(local_buffer+strlen(local_buffer), "max_part %d\n", max_part);
+		sprintf(local_buffer+strlen(local_buffer), "part_shift %d\n", part_shift);
+
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_type %u\n", g_pmbd_type);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_mergeable %u\n", g_pmbd_mergeable);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_cpu_cache_clflush %u\n", g_pmbd_cpu_cache_clflush);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_cpu_cache_flag %lu\n", g_pmbd_cpu_cache_flag);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_wr_protect %u\n", g_pmbd_wr_protect);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_wr_verify %u\n", g_pmbd_wr_verify);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_checksum %u\n", g_pmbd_checksum);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_lock %u\n", g_pmbd_lock);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_subpage_update %u\n", g_pmbd_subpage_update);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_pmap %u\n", g_pmbd_pmap);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_nts %u\n", g_pmbd_nts);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_ntl %u\n", g_pmbd_ntl);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_wb %u\n", g_pmbd_wb);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_fua %u\n", g_pmbd_fua);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_timestat %u\n", g_pmbd_timestat);
+		sprintf(local_buffer+strlen(local_buffer), "g_highmem_size %lu\n", g_highmem_size);
+		sprintf(local_buffer+strlen(local_buffer), "g_highmem_phys_addr %llu\n", (unsigned long long) g_highmem_phys_addr);
+		sprintf(local_buffer+strlen(local_buffer), "g_highmem_virt_addr %llu\n", (unsigned long long) g_highmem_virt_addr);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_nr %u\n", g_pmbd_nr);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_adjust_ns %llu\n", g_pmbd_adjust_ns);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_num_buffers %llu\n", g_pmbd_num_buffers);
+		sprintf(local_buffer+strlen(local_buffer), "g_pmbd_buffer_stride %llu\n", g_pmbd_buffer_stride);
+		sprintf(local_buffer+strlen(local_buffer), "\n");
+
+		// device specific configurations 
+		list_for_each_entry_safe(pmbd, next, &pmbd_devices, pmbd_list) {
+			int i = 0;
+
+			sprintf(local_buffer+strlen(local_buffer), "pmbd_id[%s] %d\n", pmbd->pmbd_name, pmbd->pmbd_id);
+			sprintf(local_buffer+strlen(local_buffer), "num_sectors[%s] %llu\n", pmbd->pmbd_name, (unsigned long long) pmbd->num_sectors);
+			sprintf(local_buffer+strlen(local_buffer), "sector_size[%s] %u\n", pmbd->pmbd_name, pmbd->sector_size);
+			sprintf(local_buffer+strlen(local_buffer), "pmbd_type[%s] %u\n", pmbd->pmbd_name, pmbd->pmbd_type);
+			sprintf(local_buffer+strlen(local_buffer), "rammode[%s] %u\n", pmbd->pmbd_name, pmbd->rammode);
+			sprintf(local_buffer+strlen(local_buffer), "bufmode[%s] %u\n", pmbd->pmbd_name, pmbd->bufmode);
+			sprintf(local_buffer+strlen(local_buffer), "wpmode[%s] %u\n", pmbd->pmbd_name, pmbd->wpmode);
+			sprintf(local_buffer+strlen(local_buffer), "num_buffers[%s] %u\n", pmbd->pmbd_name, pmbd->num_buffers);
+			sprintf(local_buffer+strlen(local_buffer), "buffer_stride[%s] %u\n", pmbd->pmbd_name, pmbd->buffer_stride);
+			sprintf(local_buffer+strlen(local_buffer), "pb_size[%s] %u\n", pmbd->pmbd_name, pmbd->pb_size);
+			sprintf(local_buffer+strlen(local_buffer), "checksum_unit_size[%s] %u\n", pmbd->pmbd_name, pmbd->checksum_unit_size);
+			sprintf(local_buffer+strlen(local_buffer), "simmode[%s] %u\n", pmbd->pmbd_name, pmbd->simmode);
+			sprintf(local_buffer+strlen(local_buffer), "rdlat[%s] %llu\n", pmbd->pmbd_name, (unsigned long long) pmbd->rdlat);
+			sprintf(local_buffer+strlen(local_buffer), "wrlat[%s] %llu\n", pmbd->pmbd_name, (unsigned long long) pmbd->wrlat);
+			sprintf(local_buffer+strlen(local_buffer), "rdbw[%s] %llu\n", pmbd->pmbd_name, (unsigned long long) pmbd->rdbw);
+			sprintf(local_buffer+strlen(local_buffer), "wrbw[%s] %llu\n", pmbd->pmbd_name, (unsigned long long) pmbd->wrbw);
+			sprintf(local_buffer+strlen(local_buffer), "rdsx[%s] %u\n", pmbd->pmbd_name, pmbd->rdsx);
+			sprintf(local_buffer+strlen(local_buffer), "wrsx[%s] %u\n", pmbd->pmbd_name, pmbd->wrsx);
+			sprintf(local_buffer+strlen(local_buffer), "rdpause[%s] %llu\n", pmbd->pmbd_name, (unsigned long long) pmbd->rdpause);
+			sprintf(local_buffer+strlen(local_buffer), "wrpause[%s] %llu\n", pmbd->pmbd_name, (unsigned long long) pmbd->wrpause);
+
+			for (i = 0; i < pmbd->num_buffers; i ++){
+				PMBD_BUFFER_T* buffer = pmbd->buffers[i];
+					sprintf(local_buffer+strlen(local_buffer), "buffer%d[%s]buffer_id %u\n", i, pmbd->pmbd_name, buffer->buffer_id);
+					sprintf(local_buffer+strlen(local_buffer), "buffer%d[%s]num_blocks %lu\n", i, pmbd->pmbd_name, (unsigned long) buffer->num_blocks);
+					sprintf(local_buffer+strlen(local_buffer), "buffer%d[%s]batch_size %lu\n", i, pmbd->pmbd_name, (unsigned long) buffer->batch_size);
+			}
+
+		}
+		seq_printf(m,"%s",local_buffer);
+		rtn = strlen(local_buffer);
+		kfree(local_buffer);
+	return 0;
+}
 
 static int pmbd_proc_devstat_read(char* buffer, char** start, off_t offset, int count, int* eof, void* data)
 {
@@ -4107,9 +4229,22 @@ static int pmbd_proc_devstat_read(char* buffer, char** start, off_t offset, int 
 	return rtn;
 }
 
+int simple_pmbd_proc_devstat_read(struct inode *inode, struct file *file)
+{
+        return(single_open(file, pmbd_proc_devstat_read, NULL));
+}
+struct file_operations proc_dev_op=
+{
+    .read=simple_pmbd_proc_devstat_read,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+    .owner=THIS_MODULE,
+};
 static int pmbd_proc_devstat_create(PMBD_DEVICE_T* pmbd)
 {
 	/* create a /proc/pmbd/<dev> entry */
+/*
 	pmbd->proc_devstat = create_proc_entry(pmbd->pmbd_name, S_IRUGO, proc_pmbd);
 	if (pmbd->proc_devstat == NULL) {
 		remove_proc_entry(pmbd->pmbd_name, proc_pmbd);
@@ -4117,7 +4252,9 @@ static int pmbd_proc_devstat_create(PMBD_DEVICE_T* pmbd)
 		return -ENOMEM;
 	}
 	pmbd->proc_devstat->read_proc = pmbd_proc_devstat_read;
-	printk(KERN_INFO "pmbd: /proc/pmbd/%s created\n", pmbd->pmbd_name);
+*/
+//	pmbd->proc_devstat = proc_create(pmbd->pmbd_name, S_IRUGO, proc_pmbd,&proc_dev_op);
+	printk(KERN_INFO "pmbd: /proc/pmbd/%s created\n", &pmbd->pmbd_name);
 
 	return 0;
 }
@@ -4182,7 +4319,7 @@ static int pmbd_create (PMBD_DEVICE_T* pmbd, uint64_t sectors)
  	 */
 	
 	if (PMBD_USE_VMALLOC()){
-#if LINUX_VERSION_CODE == KERNEL_VERSION(3,2,1)
+#if LINUX_VERSION_CODE == KERNEL_VERSION(3,11,0)
 		printk(KERN_ERR "pmbd: WARNING (3.2.1) changing CPU cache setting is slow!\n");
 #endif
 		pmbd_set_pages_cache_flags(pmbd);
@@ -4247,7 +4384,23 @@ static int pmbd_free_pages(PMBD_DEVICE_T* pmbd)
  * /proc file system entries
  **************************************************************************
  */
+struct file_operations proc_stat_op=
+{
+    .read=pmbd_proc_pmbdstat_read,
+    .write=NULL,
+    .owner=THIS_MODULE,
+};
 
+int simple_pmbd_proc_pmbdcfg_read(struct inode *inode, struct file *file){
+	return single_open(file,pmbd_proc_pmbdcfg_read,NULL);
+}
+struct file_operations proc_cfg_op=
+{
+        .open           = simple_pmbd_proc_pmbdcfg_read,
+        .read           = seq_read,
+        .llseek         = seq_lseek,
+        .release        = single_release,
+};
 static int pmbd_proc_create(void)
 {
 	proc_pmbd= proc_mkdir("pmbd", 0);
@@ -4256,22 +4409,26 @@ static int pmbd_proc_create(void)
 		return -ENOMEM;
 	}
 
-	proc_pmbdstat = create_proc_entry("pmbdstat", S_IRUGO, proc_pmbd);
+/*	proc_pmbdstat = create_proc_entry("pmbdstat", S_IRUGO, proc_pmbd);
 	if (proc_pmbdstat == NULL){
 		remove_proc_entry("pmbdstat", proc_pmbd);
 		printk(KERN_ERR "pmbd: cannot create /proc/pmbd/pmbdstat\n");
 		return -ENOMEM;
 	}
 	proc_pmbdstat->read_proc = pmbd_proc_pmbdstat_read;
+*/
+//        proc_pmbdstat = proc_create("pmbdstat", S_IRUGO, proc_pmbd,&proc_stat_op);
 	printk(KERN_INFO "pmbd: /proc/pmbd/pmbdstat created\n");
 
-	proc_pmbdcfg = create_proc_entry("pmbdcfg", S_IRUGO, proc_pmbd);
+/*	proc_pmbdcfg = create_proc_entry("pmbdcfg", S_IRUGO, proc_pmbd);
 	if (proc_pmbdcfg == NULL){
 		remove_proc_entry("pmbdcfg", proc_pmbd);
 		printk(KERN_ERR "pmbd: cannot create /proc/pmbd/pmbdcfg\n");
 		return -ENOMEM;
 	}
 	proc_pmbdcfg->read_proc = pmbd_proc_pmbdcfg_read;
+*/
+	proc_pmbdcfg = proc_create("pmbdcfg", S_IRUGO, proc_pmbd,&proc_cfg_op);
 	printk(KERN_INFO "pmbd: /proc/pmbd/pmbdcfg created\n");
 
 	return 0;
@@ -4430,7 +4587,7 @@ static PMBD_DEVICE_T *pmbd_alloc(int i)
 #if LINUX_VERSION_CODE == KERNEL_VERSION(2,6,34)
 	blk_queue_ordered(pmbd->pmbd_queue, QUEUE_ORDERED_TAG, NULL);
 #endif
-#if LINUX_VERSION_CODE == KERNEL_VERSION(3,2,1)
+#if LINUX_VERSION_CODE == KERNEL_VERSION(3,11,0)
 	/* set flush capability, otherwise, WRITE_FLUSH and WRITE_FUA will be filtered in
  	   generic_make_request() */
 	if (PMBD_USE_FUA() && PMBD_USE_WB())
@@ -4488,7 +4645,7 @@ static void pmbd_del_one(PMBD_DEVICE_T *pmbd)
 
 static int check_kernel_version(void)
 {
-#if LINUX_VERSION_CODE == KERNEL_VERSION(3,2,1)
+#if LINUX_VERSION_CODE == KERNEL_VERSION(3,11,0)
 	printk(KERN_INFO "pmbd: Linux kernel version 3.2.1 is detected\n");
 	printk(KERN_INFO "pmbd: WARNING (3.2.1) FUA with PT-based protection (with buffer) incurs double-write overhead\n");
 	printk(KERN_INFO "pmbd: WARNING (3.2.1) No support for changing CPU cache flags with vmalloc() based PMBD\n");

@@ -219,10 +219,11 @@ static int file_r=0;
 static int file_w=0;
 static int ino[20]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 static int n_ino=0;
-
-
-
-
+static int map_count=0;
+static int ino_super=0;
+static int ino_file=0;
+static int  trans=0;
+static int nonamepage=0;
 
 
 /* /proc file system entry */
@@ -3498,13 +3499,14 @@ static int pmbd_seg_read_write(PMBD_DEVICE_T* pmbd, struct page *page, unsigned 
 	return err;
 }
 static int pmbd_map(PMBD_DEVICE_T* pmbd, struct page *page,int rw,sector_t sector){
-	struct inode *inode = mapping->host;
+	map_count++;
 	struct page *mpage;
-	int npage=g_highmem_curr_addr>>PAGE_SHIFT+sector>>(PAGE_SHIFT-SECTOR_SHIFT);
-    mpage=pfn_to_page(npage);
+	struct address_space* mapping=page->mapping;
+	int npage=(g_highmem_phys_addr>>PAGE_SHIFT)+(sector>>(PAGE_SHIFT-SECTOR_SHIFT));
+    	mpage=pfn_to_page(npage);
 //  memcpy()
-    delete_from_page_cache(page);
-    add_to_page_cache_lru(mpage, mapping,mpage->index, GFP_KERNEL);
+    	delete_from_page_cache(page);
+    	add_to_page_cache_lru(mpage, mapping,mpage->index, GFP_KERNEL);
     //page_cache_release(page)
 
 }
@@ -3524,13 +3526,17 @@ static int pmbd_do_bvec(PMBD_DEVICE_T* pmbd, struct page *page,
 	if((sector<<SECTOR_SHIFT & ~PAGE_MASK)==0) ++page_r;
 	else ++page_w;
 	unsigned long map=(unsigned long) page->mapping;
-	if((!(map&1))&& map!=0 ){ 
-	++file_r;
+	if((!(map&1))  && map!=0 ){ 
+	++file_r; 
 	ino[n_ino++]=page->mapping->host->i_ino;
 	n_ino=n_ino%20;
+	if(page->mapping->host->i_ino==0) ino_super++;
+	else ino_file++;
 	}
-	else ++file_w;
-
+	else{
+	++file_w;
+	if(map!=0) nonamepage++;
+	}
 	return pmbd_seg_read_write(pmbd, page, len, off, rw, sector, do_fua);
 }
 
@@ -3768,16 +3774,19 @@ static MKREQ_RTN_TYPE pmbd_make_request(struct request_queue *q, struct bio *bio
 	 * emulate a slower device. 
 	 */
 	bio_for_each_segment(bvec, bio, i) {
+		trans++;
 				//JWT  ########################################################
 		struct page* page=bvec->bv_page;
+		unsigned int len = bvec->bv_len;
+
 		unsigned long map=(unsigned long) page->mapping;
-			if((!(map&1))&& map!=0 &&(sector<<SECTOR_SHIFT & ~PAGE_MASK)==0 && bvec->bv_offset=0){
+			if((!(map&1))&& map!=0 && page->mapping->host->i_ino!=0 &&(sector<<SECTOR_SHIFT & ~PAGE_MASK)==0 && bvec->bv_offset==0){
 				if(rw==READ){
 					pmbd_map(pmbd,bvec->bv_page,rw,sector);
 
 				}
 				else{
-					pmbd_unmap();
+					pmbd_unmap(pmbd,bvec->bv_page,rw,sector);
 				}
 
 
@@ -3788,9 +3797,11 @@ static MKREQ_RTN_TYPE pmbd_make_request(struct request_queue *q, struct bio *bio
 
 		//JWT  ########################################################
 
-		unsigned int len = bvec->bv_len;
+		else{
 		err = pmbd_do_bvec(pmbd, bvec->bv_page, len, 
 					bvec->bv_offset, rw, sector, do_fua);
+		}
+
 		if (err)
 			break;
 		sector += len >> SECTOR_SHIFT;
@@ -4159,6 +4170,8 @@ static int pmbd_proc_pmbdcfg_read(char* buffer, char** start, off_t offset, int 
 	return rtn;
 }
 */
+
+// JWT_P
 static int pmbd_proc_pmbdcfg_read(struct seq_file* m,void* v)
 {
 	int rtn;
@@ -4170,11 +4183,14 @@ static int pmbd_proc_pmbdcfg_read(struct seq_file* m,void* v)
 		local_buffer[0] = '\0';
 
 		// global configurations 
+		sprintf(local_buffer+strlen(local_buffer),"trans %d \n",trans);
 		sprintf(local_buffer+strlen(local_buffer),"off_right %d off_wrong %d\n",off_r,off_w);
 		sprintf(local_buffer+strlen(local_buffer),"size_right %d size_wrong %d\n",size_r,size_w);
 		sprintf(local_buffer+strlen(local_buffer),"page_right %d page_wrong %d\n",page_r,page_w);
-		sprintf(local_buffer+strlen(local_buffer),"file_right %d file_wrong %d\n",file_r,file_w);
+		sprintf(local_buffer+strlen(local_buffer),"file_right %d file_wrong %d nonamepage %d\n",file_r,file_w,nonamepage);
 		sprintf(local_buffer+strlen(local_buffer),"map %d nomap %d\n",map,nomap);
+		sprintf(local_buffer+strlen(local_buffer),"super %d file  %d\n",ino_super,ino_file);
+		sprintf(local_buffer+strlen(local_buffer),"MAP_COUNT %d\n",map_count);
 		int j=0;
 		for(j=0;j<20;++j) sprintf(local_buffer+strlen(local_buffer),"ino %d\n",ino[j]);
 
@@ -4798,5 +4814,6 @@ module_init(pmbd_init);
 module_exit(pmbd_exit);
 
 /* THE END */
+
 
 

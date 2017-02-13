@@ -3497,12 +3497,18 @@ static int pmbd_seg_read_write(PMBD_DEVICE_T* pmbd, struct page *page, unsigned 
 
 	return err;
 }
-static int pmbd_map(PMBD_DEVICE_T* pmbd, struct page *page,int int rw,sector_t sector){
+static int pmbd_map(PMBD_DEVICE_T* pmbd, struct page *page,int rw,sector_t sector){
 	struct inode *inode = mapping->host;
 	struct page *mpage;
 	int npage=g_highmem_curr_addr>>PAGE_SHIFT+sector>>(PAGE_SHIFT-SECTOR_SHIFT);
     mpage=pfn_to_page(npage);
+//  memcpy()
+    delete_from_page_cache(page);
+    add_to_page_cache_lru(mpage, mapping,mpage->index, GFP_KERNEL);
+    //page_cache_release(page)
 
+}
+static int pmbd_unmap(PMBD_DEVICE_T* pmbd, struct page *page,int rw,sector_t sector){
 
 }
 static int pmbd_do_bvec(PMBD_DEVICE_T* pmbd, struct page *page,
@@ -3762,6 +3768,26 @@ static MKREQ_RTN_TYPE pmbd_make_request(struct request_queue *q, struct bio *bio
 	 * emulate a slower device. 
 	 */
 	bio_for_each_segment(bvec, bio, i) {
+				//JWT  ########################################################
+		struct page* page=bvec->bv_page;
+		unsigned long map=(unsigned long) page->mapping;
+			if((!(map&1))&& map!=0 &&(sector<<SECTOR_SHIFT & ~PAGE_MASK)==0 && bvec->bv_offset=0){
+				if(rw==READ){
+					pmbd_map(pmbd,bvec->bv_page,rw,sector);
+
+				}
+				else{
+					pmbd_unmap();
+				}
+
+
+
+
+			}
+
+
+		//JWT  ########################################################
+
 		unsigned int len = bvec->bv_len;
 		err = pmbd_do_bvec(pmbd, bvec->bv_page, len, 
 					bvec->bv_offset, rw, sector, do_fua);

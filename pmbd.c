@@ -3498,15 +3498,23 @@ static int pmbd_seg_read_write(PMBD_DEVICE_T* pmbd, struct page *page, unsigned 
 
 	return err;
 }
-static int pmbd_map(PMBD_DEVICE_T* pmbd, struct page *page,int rw,sector_t sector){
+static int pmbd_map(PMBD_DEVICE_T* pmbd, struct page *page,int rw,sector_t sector,struct bio_vec * bvec){
 	map_count++;
+	printk(KERN_INFO "pmbd: pmbd_map\n");
 	struct page *mpage;
 	struct address_space* mapping=page->mapping;
 	int npage=(g_highmem_phys_addr>>PAGE_SHIFT)+(sector>>(PAGE_SHIFT-SECTOR_SHIFT));
     	mpage=pfn_to_page(npage);
+	printk(KERN_INFO "pmbd: pfn_to_page\n");
 //  memcpy()
+	unsigned long index=page->index;
+	page->flags&=(!PAGE_FLAGS_CHECK_AT_FREE);
     	delete_from_page_cache(page);
-    	add_to_page_cache_lru(mpage, mapping,mpage->index, GFP_KERNEL);
+	printk(KERN_INFO "pmbd: delete_from_page_cache\n");
+//	list_del(&page->lru);
+    	if(!add_to_page_cache_lru(mpage, mapping,index, GFP_KERNEL)) printk(KERN_INFO "pmbd: add success\n");
+	else printk(KERN_INFO "pmbd: add fail\n");
+	bvec->bv_page=mpage;
     //page_cache_release(page)
 
 }
@@ -3526,11 +3534,15 @@ static int pmbd_do_bvec(PMBD_DEVICE_T* pmbd, struct page *page,
 	if((sector<<SECTOR_SHIFT & ~PAGE_MASK)==0) ++page_r;
 	else ++page_w;
 	unsigned long map=(unsigned long) page->mapping;
+
 	if((!(map&1))  && map!=0 ){ 
+//	if(rw==READ)	printk(KERN_INFO "pmbd: read %lu \n",page->index);
+//	else   printk(KERN_INFO "pmbd: write %lu \n",page->index);
 	++file_r; 
-	ino[n_ino++]=page->mapping->host->i_ino;
+//	ino[n_ino++]=page->mapping->host->i_ino;
+	ino[n_ino++]=map;
 	n_ino=n_ino%20;
-	if(page->mapping->host->i_ino==0) ino_super++;
+	if(map==1019339712) ino_super++;
 	else ino_file++;
 	}
 	else{
@@ -3780,14 +3792,14 @@ static MKREQ_RTN_TYPE pmbd_make_request(struct request_queue *q, struct bio *bio
 		unsigned int len = bvec->bv_len;
 
 		unsigned long map=(unsigned long) page->mapping;
-			if((!(map&1))&& map!=0 && page->mapping->host->i_ino!=0 &&(sector<<SECTOR_SHIFT & ~PAGE_MASK)==0 && bvec->bv_offset==0){
+			if((!(map&1))&& map!=0 && page->mapping->host->i_ino!=0 &&(sector<<SECTOR_SHIFT & ~PAGE_MASK)==0 && bvec->bv_offset==0 &&rw==READ ){
 				if(rw==READ){
-					pmbd_map(pmbd,bvec->bv_page,rw,sector);
+					pmbd_map(pmbd,bvec->bv_page,rw,sector,bvec);
 
 				}
-				else{
-					pmbd_unmap(pmbd,bvec->bv_page,rw,sector);
-				}
+//				else{
+//					pmbd_unmap(pmbd,bvec->bv_page,rw,sector);
+//				}
 
 
 
@@ -3969,6 +3981,7 @@ static int pmbd_proc_pmbdstat_read(char* buffer, char** start, off_t offset, int
 {
 	int rtn;
 	if (offset > 0) {
+
 		*eof = 1;
 		rtn  = 0;
 	} else {

@@ -170,7 +170,7 @@
  *  (1) We use an unoccupied major device num (261) temporarily
  *******************************************************************************
  */
-
+#include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/version.h>
 #include <linux/module.h>
@@ -217,7 +217,8 @@ static int page_r=0;
 static int page_w=0;
 static int file_r=0;
 static int file_w=0;
-static int ino[20]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static int ino[100]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static int ino_rw[100];
 static int n_ino=0;
 static int map_count=0;
 static int ino_super=0;
@@ -3498,28 +3499,64 @@ static int pmbd_seg_read_write(PMBD_DEVICE_T* pmbd, struct page *page, unsigned 
 
 	return err;
 }
+
+
+static int pmbd_page_in_range(struct page *page){
+	void* vir=page_address(page);
+	if(g_highmem_virt_addr<=vir && vir<=g_highmem_virt_addr+g_pmbd_size[0]*1024*1024) return 1;
+	return 0;
+	
+}
 static int pmbd_map(PMBD_DEVICE_T* pmbd, struct page *page,int rw,sector_t sector,struct bio_vec * bvec){
 	map_count++;
+	printk(KERN_INFO "      \n");
 	printk(KERN_INFO "pmbd: pmbd_map\n");
 	struct page *mpage;
 	struct address_space* mapping=page->mapping;
-	int npage=(g_highmem_phys_addr>>PAGE_SHIFT)+(sector>>(PAGE_SHIFT-SECTOR_SHIFT));
+	unsigned long npage=(g_highmem_phys_addr>>PAGE_SHIFT)+(sector>>(PAGE_SHIFT-SECTOR_SHIFT));
+	unsigned int level;
+	pte_t * ptep=lookup_address((unsigned long)(pmbd->mem_space+(sector<<SECTOR_SHIFT)),&level);
+	npage=pte_pfn(*ptep);
+	printk(KERN_INFO "pmbd: pfn  %lu\n",npage);
     	mpage=pfn_to_page(npage);
 	printk(KERN_INFO "pmbd: pfn_to_page\n");
 //  memcpy()
 	unsigned long index=page->index;
-	page->flags&=(!PAGE_FLAGS_CHECK_AT_FREE);
+//	page->flags&=(!PAGE_FLAGS_CHECK_AT_FREE);
+//	set_bit(PG_locked,page->flags);
+//	memcpy(mpage,page,sizeof(struct page));
+	get_page(page);
+	if(!PageUptodate(page)) printk(KERN_INFO "pmbd: page not uptodate\n");
+	printk(KERN_INFO "pmbd: page inode %lu index %lu\n",page->mapping->host->i_ino,page->index);
+	printk(KERN_INFO "pmbd: page pfn %lu %lu\n",page_to_pfn(page),page_to_pfn(mpage));
+//	mpage->flags=page->flags;
     	delete_from_page_cache(page);
 	printk(KERN_INFO "pmbd: delete_from_page_cache\n");
 //	list_del(&page->lru);
+//	unlockpage(mpage);
+//	printk(KERN_INFO "pmbd: list_del\n");
     	if(!add_to_page_cache_lru(mpage, mapping,index, GFP_KERNEL)) printk(KERN_INFO "pmbd: add success\n");
 	else printk(KERN_INFO "pmbd: add fail\n");
+// 	spin_lock_irq(&mapping->tree_lock);
+//	unsigned long error = radix_tree_insert(&mapping->page_tree, index, mpage);
+//	printk(KERN_INFO "pmbd: error %lu\n",error);
+//	spin_lock_irq(&mapping->tree_lock);
+	struct page *gpage=NULL;
+	if(!PageUptodate(mpage)) printk(KERN_INFO "pmbd: page not uptodate\n");
+	gpage=find_get_page(mpage->mapping,mpage->index);
+	printk(KERN_INFO "pmbd: gpage %lu flags %lu %lx \n   ",page_to_pfn(gpage),gpage->flags,gpage->flags);
+	if(!PageUptodate(gpage)) printk(KERN_INFO "pmbd: page not uptodate\n");
+	printk(KERN_INFO " pmbd_map end\n");
+	printk(KERN_INFO "      \n");
 	bvec->bv_page=mpage;
+//	dump_stack();
     //page_cache_release(page)
+	return 0;
 
 }
-static int pmbd_unmap(PMBD_DEVICE_T* pmbd, struct page *page,int rw,sector_t sector){
-
+static int pmbd_unmap(PMBD_DEVICE_T* pmbd, struct page *page,int rw,sector_t sector,struct bio_vec * bvec){
+	printk(KERN_INFO"unmap\n");
+	return 0;
 }
 static int pmbd_do_bvec(PMBD_DEVICE_T* pmbd, struct page *page,
 			unsigned int len, unsigned int off, int rw, sector_t sector, unsigned do_fua)
@@ -3535,15 +3572,14 @@ static int pmbd_do_bvec(PMBD_DEVICE_T* pmbd, struct page *page,
 	else ++page_w;
 	unsigned long map=(unsigned long) page->mapping;
 
-	if((!(map&1))  && map!=0 ){ 
+	if(!(map&PAGE_MAPPING_ANON) && (map!=0) ){ 
 //	if(rw==READ)	printk(KERN_INFO "pmbd: read %lu \n",page->index);
 //	else   printk(KERN_INFO "pmbd: write %lu \n",page->index);
 	++file_r; 
-//	ino[n_ino++]=page->mapping->host->i_ino;
-	ino[n_ino++]=map;
-	n_ino=n_ino%20;
-	if(map==1019339712) ino_super++;
-	else ino_file++;
+	ino_rw[n_ino]=rw;
+	ino[n_ino++]=page->mapping->host->i_ino;
+//	ino[n_ino++]=map;
+	n_ino=n_ino%100;
 	}
 	else{
 	++file_w;
@@ -3679,6 +3715,7 @@ static MKREQ_RTN_TYPE pmbd_make_request(struct request_queue *q, struct bio *bio
 {
 	int i 	= 0;
 	int err = -EIO;
+	err=0;
 	uint64_t start = 0;
 	uint64_t end   = 0;
 	struct bio_vec *bvec;
@@ -3787,19 +3824,23 @@ static MKREQ_RTN_TYPE pmbd_make_request(struct request_queue *q, struct bio *bio
 	 */
 	bio_for_each_segment(bvec, bio, i) {
 		trans++;
-				//JWT  ########################################################
+				//   ########################################################
 		struct page* page=bvec->bv_page;
 		unsigned int len = bvec->bv_len;
 
 		unsigned long map=(unsigned long) page->mapping;
-			if((!(map&1))&& map!=0 && page->mapping->host->i_ino!=0 &&(sector<<SECTOR_SHIFT & ~PAGE_MASK)==0 && bvec->bv_offset==0 &&rw==READ ){
+			if((!(map&1))&& map!=0 && page->mapping->host->i_ino!=0 &&(sector<<SECTOR_SHIFT & ~PAGE_MASK)==0 && bvec->bv_offset==0 ){
 				if(rw==READ){
-					pmbd_map(pmbd,bvec->bv_page,rw,sector,bvec);
+					err=pmbd_map(pmbd,bvec->bv_page,rw,sector,bvec);
 
 				}
-//				else{
-//					pmbd_unmap(pmbd,bvec->bv_page,rw,sector);
-//				}
+				else {
+					printk(KERN_INFO"write\n");
+					if(pmbd_page_in_range(bvec->bv_page))
+					err=pmbd_unmap(pmbd,bvec->bv_page,rw,sector,bvec);
+					else err = pmbd_do_bvec(pmbd, bvec->bv_page, len, 
+					bvec->bv_offset, rw, sector, do_fua);
+				}
 
 
 
@@ -3821,7 +3862,9 @@ static MKREQ_RTN_TYPE pmbd_make_request(struct request_queue *q, struct bio *bio
 
 out:
 	TIMESTAT_POINT(time_p4);
-
+//	if(test_bit(BIO_UPTODATE,&bio->bi_flags)) printk(KERN_INFO "pmbd: bio uptodate\n");
+	if(bio->bi_ioc) printk(KERN_INFO "pmbd: bio ioc\n");
+	if(bio->bi_css)	printk(KERN_INFO "pmbd: bio css\n");
 	bio_endio(bio, err);
 
 	TIMESTAT_POINT(time_p5);
@@ -4205,7 +4248,7 @@ static int pmbd_proc_pmbdcfg_read(struct seq_file* m,void* v)
 		sprintf(local_buffer+strlen(local_buffer),"super %d file  %d\n",ino_super,ino_file);
 		sprintf(local_buffer+strlen(local_buffer),"MAP_COUNT %d\n",map_count);
 		int j=0;
-		for(j=0;j<20;++j) sprintf(local_buffer+strlen(local_buffer),"ino %d\n",ino[j]);
+		for(j=0;j<100;++j) sprintf(local_buffer+strlen(local_buffer),"ino %d  rw %d\n",ino[j],ino_rw[j]);
 
 		sprintf(local_buffer+strlen(local_buffer), "MODULE OPTIONS: %s\n", mode);
 		sprintf(local_buffer+strlen(local_buffer), "\n");
